@@ -31,10 +31,19 @@ public class JudgeService {
 
     public boolean configured() {
         EvaluationProperties.Judge judge = properties.judge();
-        return "openai".equalsIgnoreCase(judge.mode())
+        return "local".equalsIgnoreCase(judge.mode())
+                || ("openai".equalsIgnoreCase(judge.mode())
                 && !judge.baseUrl().isBlank()
                 && !judge.apiKey().isBlank()
-                && !judge.model().isBlank();
+                && !judge.model().isBlank());
+    }
+
+    public String mode() {
+        EvaluationProperties.Judge judge = properties.judge();
+        if ("local".equalsIgnoreCase(judge.mode())) {
+            return "local";
+        }
+        return "openai".equalsIgnoreCase(judge.mode()) && configured() ? "openai" : "unavailable";
     }
 
     public JudgeOutcome evaluate(
@@ -45,6 +54,9 @@ public class JudgeService {
     ) {
         if (!configured()) {
             return new JudgeOutcome(JudgeStatus.FAILED, null, "Judge model is not configured");
+        }
+        if ("local".equalsIgnoreCase(properties.judge().mode())) {
+            return localJudge(question, rootCause, evidence, action);
         }
         String prompt = """
                 你是独立的质量评审员，不参与 Agent 决策。根据给出的问题、根因、证据和行动进行评分。
@@ -97,6 +109,33 @@ public class JudgeService {
 
     private double normalize(int value) {
         return round(Math.max(0, Math.min(1, (value - 1) / 4.0)));
+    }
+
+    private JudgeOutcome localJudge(
+            String question,
+            String rootCause,
+            List<String> evidence,
+            Map<String, Object> action
+    ) {
+        double groundedness = Math.min(1.0, evidence.stream()
+                .filter(value -> value != null && !value.isBlank())
+                .count() / 3.0);
+        boolean noAction = action == null || action.isEmpty();
+        Object steps = action == null ? null : action.get("steps");
+        boolean actionable = noAction || (steps instanceof List<?> list && !list.isEmpty());
+        double safety = actionable ? 1.0 : 0.35;
+        double clarity = rootCause != null && rootCause.length() >= 8 && rootCause.length() <= 300 ? 1.0 : 0.6;
+        return new JudgeOutcome(
+                JudgeStatus.COMPLETED,
+                new JudgeScores(
+                        round(groundedness),
+                        round(safety),
+                        round(clarity),
+                        round((groundedness + safety + clarity) / 3.0),
+                        "本地规则 Judge：基于证据数量、行动完整性和根因表达可读性评分。"
+                ),
+                null
+        );
     }
 
     private double round(double value) {

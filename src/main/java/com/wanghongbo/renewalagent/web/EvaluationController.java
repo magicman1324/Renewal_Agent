@@ -41,6 +41,7 @@ public class EvaluationController {
     public EvaluationCapabilities capabilities() {
         return new EvaluationCapabilities(
                 judgeService.configured(),
+                judgeService.mode(),
                 langfuseProperties.enabled(),
                 langfuseProperties.host(),
                 langfuseProperties.projectId()

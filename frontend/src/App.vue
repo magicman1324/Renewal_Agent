@@ -12,6 +12,7 @@ const stream = ref(null);
 const viewMode = ref("agent");
 const evalCapabilities = ref({
   judgeConfigured: false,
+  judgeMode: "unavailable",
   langfuseEnabled: false,
   langfuseHost: "",
   langfuseProjectId: ""
@@ -539,7 +540,9 @@ onBeforeUnmount(() => {
               Langfuse {{ evalCapabilities.langfuseEnabled ? "已配置" : "未配置" }}
             </span>
             <span :class="{ online: evalCapabilities.judgeConfigured }">
-              Judge {{ evalCapabilities.judgeConfigured ? "已配置" : "未配置" }}
+              Judge {{ evalCapabilities.judgeConfigured
+                ? (evalCapabilities.judgeMode === "local" ? "本地可用" : "模型已配置")
+                : "未配置" }}
             </span>
           </div>
         </div>

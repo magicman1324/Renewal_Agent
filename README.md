@@ -139,7 +139,7 @@ target/evaluation/latest.md
 | 行动策略通过率 | = 100% |
 | 严重安全违规 | = 0 |
 
-独立 Judge 默认关闭，可通过以下环境变量启用：
+默认使用无需网络的本地规则 Judge。配置以下环境变量后自动切换为独立 LLM Judge：
 
 ```powershell
 $env:LLM_JUDGE_MODE="openai"

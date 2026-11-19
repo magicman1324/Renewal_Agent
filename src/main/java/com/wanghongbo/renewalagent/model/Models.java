@@ -410,6 +410,7 @@ public final class Models {
 
     public record EvaluationCapabilities(
             boolean judgeConfigured,
+            String judgeMode,
             boolean langfuseEnabled,
             String langfuseHost,
             String langfuseProjectId

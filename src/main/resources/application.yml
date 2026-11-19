@@ -70,7 +70,7 @@ app:
     output-dir: target/evaluation
     ci-fail-on-threshold: true
     judge:
-      mode: ${LLM_JUDGE_MODE:disabled}
+      mode: ${LLM_JUDGE_MODE:local}
       base-url: ${LLM_JUDGE_BASE_URL:}
       api-key: ${LLM_JUDGE_API_KEY:}
       model: ${LLM_JUDGE_MODEL:}
