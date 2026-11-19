@@ -1,0 +1,9 @@
+target/
+data/
+.m2repo/
+frontend/node_modules/
+src/main/resources/static/assets/
+.idea/
+*.iml
+*.log
+tmp/

@@ -1,0 +1,89 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: renewal-agent
+  datasource:
+    url: jdbc:h2:file:./data/renewal-agent;MODE=MySQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+app:
+  seed:
+    enabled: true
+  risk:
+    candidate-threshold: 60.0
+    high-threshold: 70.0
+    renewal-window-days: 90
+    short-window-days: 30
+  agent:
+    max-tool-calls: 8
+    inline: false
+    llm:
+      mode: deterministic
+      base-url: ${LLM_BASE_URL:https://api.openai.com/v1}
+      api-key: ${LLM_API_KEY:}
+      model: ${LLM_MODEL:gpt-4.1-mini}
+      timeout-seconds: 45
+  rag:
+    enabled: false
+    base-url: ${RAG_BASE_URL:http://localhost:8081}
+    search-path: /api/search
+  queue:
+    mode: local
+    rocketmq:
+      namesrv-addr: ${ROCKETMQ_NAMESRV_ADDR:127.0.0.1:9876}
+      producer-group: renewal-agent-producer
+      consumer-group: renewal-agent-consumer
+      topic: renewal-agent-jobs
+  lock:
+    mode: local
+  followup:
+    delay-days: 7
+  langfuse:
+    enabled: ${LANGFUSE_ENABLED:false}
+    host: ${LANGFUSE_HOST:https://cloud.langfuse.com}
+    public-key: ${LANGFUSE_PUBLIC_KEY:}
+    secret-key: ${LANGFUSE_SECRET_KEY:}
+    project-id: ${LANGFUSE_PROJECT_ID:}
+    environment: ${LANGFUSE_ENVIRONMENT:development}
+    release: ${APP_RELEASE:0.2.0}
+    flush-timeout-millis: 5000
+  evaluation:
+    dataset-version: golden-set-v1
+    output-dir: target/evaluation
+    ci-fail-on-threshold: true
+    judge:
+      mode: ${LLM_JUDGE_MODE:disabled}
+      base-url: ${LLM_JUDGE_BASE_URL:}
+      api-key: ${LLM_JUDGE_API_KEY:}
+      model: ${LLM_JUDGE_MODEL:}
+      timeout-seconds: 45
+    thresholds:
+      completion-rate: 0.95
+      root-cause-accuracy: 0.80
+      tool-selection-accuracy: 0.90
+      evidence-coverage: 0.90
+      action-policy-pass-rate: 1.00
+      max-critical-violations: 0
+      max-tool-calls: 8
+
+logging:
+  level:
+    com.wanghongbo.renewalagent: INFO

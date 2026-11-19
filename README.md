@@ -1,0 +1,166 @@
+# SaaS 客户续费经营 Agent
+
+面向 B2B 订阅制 SaaS 客户成功团队的续费风险调查 Agent。系统每天扫描未来 90 天内到期的客户，通过规则引擎发现风险，再由 Agent 自主调用客户档案、产品使用、客服工单、账务和 RAG 知识工具，形成带证据的根因分析和处置草案。
+
+与普通 RAG 问答的差异：
+
+- RAG 回答“续费政策和处置手册怎么说”
+- Agent 回答“这个客户为什么有风险”，并创建可跟踪的内部待办
+- 7 天后系统重新计算使用、工单和账务指标，记录行动效果
+
+## 核心流程
+
+```text
+续费风险扫描
+  -> 规则分与风险因子
+  -> Agent 规划下一步工具
+  -> 客户 / 使用 / 工单 / 账单 / RAG 多源取证
+  -> 根因分析与行动草案
+  -> 人工确认
+  -> 幂等创建内部待办
+  -> 7 天后复查
+```
+
+Agent 状态机：
+
+```text
+CREATED -> PLANNING -> EXECUTING_TOOL -> ANALYZING
+        -> WAITING_APPROVAL -> COMPLETED | FAILED
+```
+
+## 技术栈
+
+- Java 21
+- Spring Boot 3.4
+- Spring MVC、JDBC、Actuator
+- H2（开箱即用）或 MySQL
+- Redis 分布式锁（可选）
+- RocketMQ 异步调查队列（可选）
+- Vue 3 + Vite
+- OpenAI-compatible LLM；无模型密钥时使用确定性规划与降级分析
+
+## 快速启动
+
+环境要求：
+
+- JDK 21
+- Node.js 20+
+- Maven 3.9+ 或 Maven Wrapper
+
+前端已构建至 Spring Boot 静态资源目录。启动后端：
+
+```powershell
+.\mvnw.cmd spring-boot:run
+```
+
+打开 [http://localhost:8080](http://localhost:8080)。
+
+前端开发模式：
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+前端生产构建：
+
+```powershell
+cd frontend
+npm run build
+```
+
+## 合成数据
+
+首次启动会生成 36 个客户和 180 天历史数据，包含 6 类账户：
+
+- 健康账户
+- 功能采用不足
+- 客服工单阻塞
+- 账务异常
+- 关键联系人失联
+- 真实流失
+
+固定随机种子保证演示结果可复现。演示账户 `ACC-003` 是工单阻塞场景，`ACC-004` 是账务阻塞场景。
+
+## LLM 配置
+
+默认 `deterministic` 模式不调用外部模型，可直接运行和测试：
+
+```text
+app.agent.llm.mode=deterministic
+```
+
+使用 OpenAI-compatible 服务：
+
+```powershell
+$env:LLM_BASE_URL="https://your-provider.example/v1"
+$env:LLM_API_KEY="your-key"
+$env:LLM_MODEL="your-model"
+
+.\mvnw.cmd spring-boot:run -Dspring-boot.run.arguments="--app.agent.llm.mode=openai"
+```
+
+模型只负责选择已注册工具和生成结构化分析。工具白名单、状态机、最大调用次数、审批、幂等和审计全部由 Java 后端执行。
+
+## MySQL、Redis 与 RocketMQ
+
+默认使用本地 H2 文件数据库，不需要安装任何基础设施。
+
+MySQL：
+
+```powershell
+$env:MYSQL_URL="jdbc:mysql://localhost:3306/renewal_agent?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai"
+$env:MYSQL_USERNAME="root"
+$env:MYSQL_PASSWORD="your-password"
+
+.\mvnw.cmd spring-boot:run -Dspring-boot.run.profiles=mysql
+```
+
+Redis 分布式扫描锁：
+
+```powershell
+.\mvnw.cmd spring-boot:run -Dspring-boot.run.arguments="--app.lock.mode=redis"
+```
+
+RocketMQ 调查队列：
+
+```powershell
+.\mvnw.cmd spring-boot:run -Dspring-boot.run.arguments="--app.queue.mode=rocketmq --app.agent.inline=false --app.queue.rocketmq.namesrv-addr=127.0.0.1:9876"
+```
+
+## API
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/api/overview` | 总览指标 |
+| GET | `/api/risk-candidates` | 风险客户队列 |
+| POST | `/api/jobs/risk-scan` | 手动触发风险扫描 |
+| POST | `/api/accounts/{id}/investigations` | 发起 Agent 调查 |
+| GET | `/api/investigations/{id}` | 查看分析、证据与任务 |
+| GET | `/api/investigations/{id}/events` | SSE 执行轨迹 |
+| POST | `/api/investigations/{id}/approve-task` | 确认并幂等创建待办 |
+| POST | `/api/tasks/{id}/follow-up` | 立即模拟到期复查 |
+| GET | `/actuator/health` | 健康检查 |
+
+## 测试
+
+```powershell
+.\mvnw.cmd test
+```
+
+测试覆盖：
+
+- 36 个合成客户与风险候选生成
+- 风险阈值和账务风险保底规则
+- 完整 Agent 工具循环和证据留存
+- 审批幂等建单
+- 到期复查结果
+
+## 安全边界
+
+- Agent 只拥有只读业务工具。
+- 外部消息、价格修改、折扣和真实 CRM 写入不在 v1 范围内。
+- 唯一业务写操作是用户确认后创建内部任务。
+- 模型输出经过结构校验；非法输出会降级为基于规则的分析。
+- 工具数据按不可信输入处理，不允许生成任意 SQL 或动态代码。
