@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LANGFUSE_ENABLED: "false"
+      LLM_JUDGE_MODE: disabled
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Backend tests
+        run: ./mvnw --batch-mode test
+
+      - name: Golden-set regression gate
+        run: ./mvnw --batch-mode -Peval verify
+
+      - name: Package application
+        run: ./mvnw --batch-mode -DskipTests package
+
+      - name: Upload application and evaluation report
+        uses: actions/upload-artifact@v7
+        with:
+          name: renewal-agent-${{ github.sha }}
+          path: |
+            target/renewal-agent-*.jar
+            target/evaluation/latest.json
+            target/evaluation/latest.md
+          if-no-files-found: error

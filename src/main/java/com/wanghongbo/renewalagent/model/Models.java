@@ -27,6 +27,7 @@ public final class Models {
         ANALYZING,
         WAITING_APPROVAL,
         COMPLETED,
+        COMPLETED_NO_ACTION,
         FAILED
     }
 
@@ -146,9 +147,22 @@ public final class Models {
 
     public record FinalAnalysis(
             String summary,
+            String rootCauseCode,
             String rootCause,
             ActionDraft action
     ) {
+    }
+
+    public record TokenUsage(long inputTokens, long outputTokens, String model) {
+        public static TokenUsage deterministic() {
+            return new TokenUsage(0, 0, "deterministic");
+        }
+    }
+
+    public record PlanningOutcome(Decision decision, TokenUsage usage) {
+    }
+
+    public record AnalysisOutcome(FinalAnalysis analysis, TokenUsage usage) {
     }
 
     public record ActionDraft(
@@ -226,12 +240,38 @@ public final class Models {
     ) {
     }
 
+    public record AgentTelemetry(
+            String traceId,
+            String rootObservationId,
+            int toolCalls,
+            long inputTokens,
+            long outputTokens,
+            long durationMs,
+            String langfuseStatus,
+            String langfuseUrl
+    ) {
+    }
+
+    public record AgentExecutionResult(
+            InvestigationStatus status,
+            String summary,
+            String rootCauseCode,
+            String rootCause,
+            ActionDraft action,
+            String error,
+            List<String> calledTools,
+            List<Evidence> evidence,
+            AgentTelemetry telemetry
+    ) {
+    }
+
     public record InvestigationView(
             Investigation investigation,
             List<AgentStep> steps,
             List<Evidence> evidence,
             InternalTask task,
-            List<FollowUpResult> followUps
+            List<FollowUpResult> followUps,
+            AgentTelemetry telemetry
     ) {
     }
 
@@ -249,6 +289,134 @@ public final class Models {
             int candidateCount,
             int highRiskCount,
             int openTaskCount
+    ) {
+    }
+
+    public record EvaluationCase(
+            String caseId,
+            String accountId,
+            String question,
+            String expectedRootCause,
+            String expectedOwnerRole,
+            List<String> requiredTools,
+            List<String> requiredEvidence,
+            List<String> forbiddenActions,
+            int maxToolCalls
+    ) {
+    }
+
+    public record EvaluationThresholds(
+            double completionRate,
+            double rootCauseAccuracy,
+            double toolSelectionAccuracy,
+            double evidenceCoverage,
+            double actionPolicyPassRate,
+            int maxCriticalViolations,
+            int maxToolCalls
+    ) {
+    }
+
+    public record EvaluationSummary(
+            int totalCases,
+            int completedCases,
+            double completionRate,
+            double rootCauseAccuracy,
+            double toolSelectionAccuracy,
+            double evidenceCoverage,
+            double actionPolicyPassRate,
+            int criticalViolations,
+            int maxToolCalls,
+            String fixtureVersion,
+            String fixtureHash,
+            String dataStatus,
+            double averageDurationMs,
+            double p95DurationMs,
+            long totalInputTokens,
+            long totalOutputTokens,
+            double averageJudgeScore,
+            boolean passed
+    ) {
+    }
+
+    public record JudgeScores(
+            double groundedness,
+            double actionSafety,
+            double clarity,
+            double overall,
+            String comment
+    ) {
+    }
+
+    public record EvaluationItemResult(
+            String id,
+            String runId,
+            String caseId,
+            String accountId,
+            String expectedRootCause,
+            String actualRootCause,
+            String expectedOwnerRole,
+            String actualOwnerRole,
+            List<String> expectedTools,
+            List<String> actualTools,
+            List<String> expectedEvidence,
+            List<String> actualEvidence,
+            Map<String, Double> scores,
+            boolean passed,
+            boolean criticalViolation,
+            String traceId,
+            String rootObservationId,
+            long durationMs,
+            long inputTokens,
+            long outputTokens,
+            Map<String, Object> judgeInput,
+            JudgeScores judgeScores,
+            String error
+    ) {
+    }
+
+    public enum EvaluationRunStatus {
+        PENDING,
+        RUNNING,
+        COMPLETED,
+        FAILED
+    }
+
+    public enum JudgeStatus {
+        NOT_REQUESTED,
+        PENDING,
+        COMPLETED,
+        FAILED
+    }
+
+    public record EvaluationRun(
+            String id,
+            String datasetVersion,
+            String mode,
+            JudgeStatus judgeStatus,
+            EvaluationRunStatus status,
+            EvaluationThresholds thresholds,
+            EvaluationSummary summary,
+            String previousRunId,
+            Boolean passed,
+            String engineVersion,
+            String langfuseExperimentId,
+            Instant startedAt,
+            Instant completedAt
+    ) {
+    }
+
+    public record EvaluationRunView(EvaluationRun run, List<EvaluationItemResult> items) {
+    }
+
+    public record EvaluationRunRequest(Boolean judge, Boolean publishToLangfuse) {
+    }
+
+    public record EvaluationCapabilities(
+            boolean judgeConfigured,
+            String judgeMode,
+            boolean langfuseEnabled,
+            String langfuseHost,
+            String langfuseProjectId
     ) {
     }
 }

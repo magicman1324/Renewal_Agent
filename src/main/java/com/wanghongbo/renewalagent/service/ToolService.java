@@ -7,7 +7,7 @@ import com.wanghongbo.renewalagent.model.Models.Ticket;
 import com.wanghongbo.renewalagent.model.Models.ToolDefinition;
 import com.wanghongbo.renewalagent.model.Models.ToolResult;
 import com.wanghongbo.renewalagent.model.Models.UsagePoint;
-import com.wanghongbo.renewalagent.persistence.DatabaseService;
+import com.wanghongbo.renewalagent.persistence.AgentDataGateway;
 import java.time.Clock;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
@@ -31,18 +31,18 @@ public class ToolService {
             "calculateRiskFactors"
     );
 
-    private final DatabaseService database;
+    private final AgentDataGateway agentDataGateway;
     private final KnowledgeService knowledgeService;
     private final RiskScoringService riskScoringService;
     private final Clock clock;
 
     public ToolService(
-            DatabaseService database,
+            AgentDataGateway agentDataGateway,
             KnowledgeService knowledgeService,
             RiskScoringService riskScoringService,
             Clock clock
     ) {
-        this.database = database;
+        this.agentDataGateway = agentDataGateway;
         this.knowledgeService = knowledgeService;
         this.riskScoringService = riskScoringService;
         this.clock = clock;
@@ -66,15 +66,15 @@ public class ToolService {
         LocalDate usageFrom = LocalDate.now(clock).minusDays(60);
         return switch (toolName) {
             case "getAccountProfile" -> accountProfile(account);
-            case "getUsageTrend" -> usageTrend(account, database.findUsage(account.id(), usageFrom));
-            case "getSupportTickets" -> supportTickets(account, database.findOpenTickets(account.id()));
-            case "getBillingStatus" -> billingStatus(account, database.findInvoices(account.id()));
+            case "getUsageTrend" -> usageTrend(account, agentDataGateway.findUsage(account.id(), usageFrom));
+            case "getSupportTickets" -> supportTickets(account, agentDataGateway.findOpenTickets(account.id()));
+            case "getBillingStatus" -> billingStatus(account, agentDataGateway.findInvoices(account.id()));
             case "searchRenewalPlaybook" -> playbook(account, arguments);
             case "calculateRiskFactors" -> riskFactors(
                     account,
-                    database.findUsage(account.id(), usageFrom),
-                    database.findOpenTickets(account.id()),
-                    database.findInvoices(account.id())
+                    agentDataGateway.findUsage(account.id(), usageFrom),
+                    agentDataGateway.findOpenTickets(account.id()),
+                    agentDataGateway.findInvoices(account.id())
             );
             default -> ToolResult.failure(toolName, "未实现工具");
         };

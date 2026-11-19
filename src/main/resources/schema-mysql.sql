@@ -157,3 +157,9 @@ CREATE TABLE IF NOT EXISTS evaluation_items (
     judge_scores_json TEXT,
     error TEXT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS seed_metadata (
+    seed_key VARCHAR(100) PRIMARY KEY,
+    seed_version VARCHAR(100) NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

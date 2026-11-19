@@ -62,6 +62,9 @@ class RenewalAgentIntegrationTest {
         assertThat(created.investigation().status()).isEqualTo(InvestigationStatus.WAITING_APPROVAL);
         assertThat(created.evidence()).hasSizeGreaterThanOrEqualTo(6);
         assertThat(created.steps()).hasSizeGreaterThanOrEqualTo(7);
+        assertThat(created.telemetry()).isNotNull();
+        assertThat(created.telemetry().toolCalls()).isEqualTo(6);
+        assertThat(created.investigation().summary()).contains("工单");
         assertThat(created.investigation().action()).isNotNull();
         assertThat(created.investigation().action().steps()).isNotEmpty();
 

@@ -177,6 +177,7 @@ public class ApiController {
     private boolean isTerminal(InvestigationStatus status) {
         return status == InvestigationStatus.WAITING_APPROVAL
                 || status == InvestigationStatus.COMPLETED
+                || status == InvestigationStatus.COMPLETED_NO_ACTION
                 || status == InvestigationStatus.FAILED;
     }
 }

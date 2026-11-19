@@ -17,11 +17,14 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class SyntheticDataService {
 
     private static final Logger log = LoggerFactory.getLogger(SyntheticDataService.class);
+    private static final String SEED_KEY = "renewal-agent-demo";
+    private static final String SEED_VERSION = "demo-v2";
     private static final int ACCOUNT_COUNT = 36;
     private static final int HISTORY_DAYS = 180;
     private static final String[] NAMES = {
@@ -51,14 +54,20 @@ public class SyntheticDataService {
             return;
         }
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM accounts", Integer.class);
-        if (count != null && count > 0) {
+        String version = jdbc.query("""
+                SELECT seed_version FROM seed_metadata WHERE seed_key = ?
+                """, rs -> rs.next() ? rs.getString(1) : null, SEED_KEY);
+        if (count != null && count > 0 && SEED_VERSION.equals(version)) {
             return;
         }
         seed();
-        log.info("Seeded {} synthetic SaaS accounts with {} days of history", ACCOUNT_COUNT, HISTORY_DAYS);
+        log.info("Seeded {} synthetic SaaS accounts with {} days of history using {}",
+                ACCOUNT_COUNT, HISTORY_DAYS, SEED_VERSION);
     }
 
+    @Transactional
     public synchronized void seed() {
+        clearOwnedDemoData();
         LocalDate today = LocalDate.now();
         List<Object[]> accountRows = new ArrayList<>();
         List<Object[]> usageRows = new ArrayList<>();
@@ -101,7 +110,7 @@ public class SyntheticDataService {
                     case SUPPORT_BLOCKED -> 0.80 - progress * 0.22;
                     case BILLING_BLOCKED -> 0.80 + noise(0.02);
                     case SPONSOR_DISENGAGED -> 0.73 - progress * 0.05;
-                    case TRUE_CHURN -> 0.78 - progress * 0.44;
+                    case TRUE_CHURN -> 0.95 - progress * 0.76;
                 };
                 double adoption = switch (archetype) {
                     case HEALTHY -> 0.74 + noise(0.035);
@@ -109,7 +118,7 @@ public class SyntheticDataService {
                     case SUPPORT_BLOCKED -> 0.68 - progress * 0.22;
                     case BILLING_BLOCKED -> 0.69 + noise(0.025);
                     case SPONSOR_DISENGAGED -> 0.60 - progress * 0.07;
-                    case TRUE_CHURN -> 0.61 - progress * 0.38;
+                    case TRUE_CHURN -> 0.75 - progress * 0.62;
                 };
                 int activeUsers = Math.max(3, (int) Math.round(licensedSeats * baseUtilization));
                 long events = Math.max(20, (long) (activeUsers * (16 + random.nextDouble() * 12)));
@@ -160,6 +169,24 @@ public class SyntheticDataService {
                 INSERT INTO invoices(id, account_id, amount, due_date, status)
                 VALUES (?, ?, ?, ?, ?)
                 """, invoiceRows);
+        int updated = jdbc.update("""
+                UPDATE seed_metadata SET seed_version = ?, updated_at = ?
+                WHERE seed_key = ?
+                """, SEED_VERSION, new Timestamp(System.currentTimeMillis()), SEED_KEY);
+        if (updated == 0) {
+            jdbc.update("""
+                    INSERT INTO seed_metadata(seed_key, seed_version, updated_at)
+                    VALUES (?, ?, ?)
+                    """, SEED_KEY, SEED_VERSION, new Timestamp(System.currentTimeMillis()));
+        }
+    }
+
+    private void clearOwnedDemoData() {
+        jdbc.update("DELETE FROM risk_candidates WHERE account_id LIKE 'ACC-%'");
+        jdbc.update("DELETE FROM invoices WHERE account_id LIKE 'ACC-%'");
+        jdbc.update("DELETE FROM tickets WHERE account_id LIKE 'ACC-%'");
+        jdbc.update("DELETE FROM usage_daily WHERE account_id LIKE 'ACC-%'");
+        jdbc.update("DELETE FROM accounts WHERE id LIKE 'ACC-%'");
     }
 
     private Object[] ticket(
