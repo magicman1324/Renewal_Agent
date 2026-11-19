@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wanghongbo.renewalagent.model.Models.Account;
 import com.wanghongbo.renewalagent.model.Models.ActionDraft;
+import com.wanghongbo.renewalagent.model.Models.AgentTelemetry;
 import com.wanghongbo.renewalagent.model.Models.AgentStep;
 import com.wanghongbo.renewalagent.model.Models.Archetype;
 import com.wanghongbo.renewalagent.model.Models.Evidence;
@@ -372,6 +373,53 @@ public class DatabaseService {
         Integer count = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM risk_candidates WHERE severity = 'HIGH'", Integer.class);
         return count == null ? 0 : count;
+    }
+
+    public void saveTelemetry(String investigationId, AgentTelemetry telemetry) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM investigation_telemetry WHERE investigation_id = ?",
+                Integer.class,
+                investigationId
+        );
+        if (count != null && count > 0) {
+            jdbc.update("""
+                    UPDATE investigation_telemetry SET trace_id = ?, root_observation_id = ?,
+                        tool_calls = ?, input_tokens = ?, output_tokens = ?, duration_ms = ?,
+                        langfuse_status = ?, created_at = ? WHERE investigation_id = ?
+                    """, telemetry.traceId(), telemetry.rootObservationId(), telemetry.toolCalls(),
+                    telemetry.inputTokens(), telemetry.outputTokens(), telemetry.durationMs(),
+                    telemetry.langfuseStatus(), java.sql.Timestamp.from(Instant.now()), investigationId);
+            return;
+        }
+        jdbc.update("""
+                INSERT INTO investigation_telemetry(investigation_id, trace_id, root_observation_id,
+                    tool_calls, input_tokens, output_tokens, duration_ms, langfuse_status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, investigationId, telemetry.traceId(), telemetry.rootObservationId(),
+                telemetry.toolCalls(), telemetry.inputTokens(), telemetry.outputTokens(),
+                telemetry.durationMs(), telemetry.langfuseStatus(),
+                java.sql.Timestamp.from(Instant.now()));
+    }
+
+    public Optional<AgentTelemetry> findTelemetry(String investigationId) {
+        try {
+            return Optional.ofNullable(jdbc.queryForObject("""
+                    SELECT trace_id, root_observation_id, tool_calls, input_tokens, output_tokens,
+                           duration_ms, langfuse_status
+                    FROM investigation_telemetry WHERE investigation_id = ?
+                    """, (rs, rowNum) -> new AgentTelemetry(
+                    rs.getString("trace_id"),
+                    rs.getString("root_observation_id"),
+                    rs.getInt("tool_calls"),
+                    rs.getLong("input_tokens"),
+                    rs.getLong("output_tokens"),
+                    rs.getLong("duration_ms"),
+                    rs.getString("langfuse_status"),
+                    null
+            ), investigationId));
+        } catch (EmptyResultDataAccessException ex) {
+            return Optional.empty();
+        }
     }
 
     private Account mapAccount(ResultSet rs, int rowNum) throws SQLException {

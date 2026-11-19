@@ -6,10 +6,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wanghongbo.renewalagent.config.AppProperties;
 import com.wanghongbo.renewalagent.model.Models.Account;
 import com.wanghongbo.renewalagent.model.Models.ActionDraft;
+import com.wanghongbo.renewalagent.model.Models.AnalysisOutcome;
 import com.wanghongbo.renewalagent.model.Models.Decision;
 import com.wanghongbo.renewalagent.model.Models.Evidence;
 import com.wanghongbo.renewalagent.model.Models.FinalAnalysis;
+import com.wanghongbo.renewalagent.model.Models.PlanningOutcome;
 import com.wanghongbo.renewalagent.model.Models.RiskFactor;
+import com.wanghongbo.renewalagent.model.Models.TokenUsage;
 import com.wanghongbo.renewalagent.model.Models.ToolDefinition;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -50,7 +53,7 @@ public class AgentIntelligenceService {
         this.objectMapper = objectMapper;
     }
 
-    public Decision nextDecision(
+    public PlanningOutcome nextDecision(
             Account account,
             String question,
             List<ToolDefinition> tools,
@@ -70,25 +73,36 @@ public class AgentIntelligenceService {
                 Map<String, Object> args = tool.equals("searchRenewalPlaybook")
                         ? Map.of("query", "续费风险处置 " + account.archetype())
                         : Map.of();
-                return new Decision("CALL_TOOL", tool, args, deterministicReason(tool));
+                return new PlanningOutcome(
+                        new Decision("CALL_TOOL", tool, args, deterministicReason(tool)),
+                        TokenUsage.deterministic()
+                );
             }
         }
-        return Decision.finish("已收集客户、使用、工单、账务、Playbook 和风险因子证据");
+        return new PlanningOutcome(
+                Decision.finish("已收集客户、使用、工单、账务、Playbook 和风险因子证据"),
+                TokenUsage.deterministic()
+        );
     }
 
-    public FinalAnalysis analyze(Account account, String question, List<Evidence> evidence) {
+    public AnalysisOutcome analyze(
+            Account account,
+            String question,
+            List<Evidence> evidence,
+            double riskScore
+    ) {
         if ("openai".equalsIgnoreCase(properties.agent().llm().mode())
                 && !properties.agent().llm().apiKey().isBlank()) {
             try {
-                return openAiAnalyze(account, question, evidence);
+                return openAiAnalyze(account, question, evidence, riskScore);
             } catch (RuntimeException ex) {
                 // Preserve a useful, auditable analysis instead of failing the whole investigation.
             }
         }
-        return deterministicAnalysis(account, evidence);
+        return new AnalysisOutcome(deterministicAnalysis(account, evidence, riskScore), TokenUsage.deterministic());
     }
 
-    private Decision openAiDecision(
+    private PlanningOutcome openAiDecision(
             Account account,
             String question,
             List<ToolDefinition> tools,
@@ -114,29 +128,43 @@ public class AgentIntelligenceService {
                 objectMapper.valueToTree(tools),
                 summarizeEvidence(evidence)
         );
-        JsonNode json = callChat(prompt, true);
-        return objectMapper.convertValue(json, Decision.class);
+        LlmCallResult result = callChat(prompt, true);
+        return new PlanningOutcome(objectMapper.convertValue(result.json(), Decision.class), result.usage());
     }
 
-    private FinalAnalysis openAiAnalyze(Account account, String question, List<Evidence> evidence) {
+    private AnalysisOutcome openAiAnalyze(
+            Account account,
+            String question,
+            List<Evidence> evidence,
+            double riskScore
+    ) {
         String prompt = """
                 你是谨慎的企业客户续费分析师。只能基于给出的证据生成结论，不得编造数字。
                 每个行动都要绑定证据标签。写操作只建议创建内部客户成功待办，不发送外部消息、不改价格。
                 客户：%s
                 问题：%s
+                规则风险分：%.2f。风险分低于阈值或证据表明客户健康时，rootCauseCode 必须为 HEALTHY，action 必须为 null。
                 证据：%s
 
                 仅输出 JSON：
-                {"summary":"两段以内分析","rootCause":"主因",
+                {"summary":"两段以内分析","rootCauseCode":"ADOPTION_GAP|SUPPORT_BLOCKED|BILLING_BLOCKED|SPONSOR_DISENGAGED|TRUE_CHURN|HEALTHY","rootCause":"主因",
                  "action":{"title":"任务标题","ownerRole":"CUSTOMER_SUCCESS|SUPPORT|FINANCE|SALES",
                  "priority":"HIGH|MEDIUM|LOW","summary":"动作摘要","rationale":"为何这样做",
                  "steps":["步骤"],"evidenceLabels":["证据标签"],"dueInDays":7}}
-                """.formatted(objectMapper.valueToTree(account), question, objectMapper.valueToTree(evidence));
-        JsonNode json = callChat(prompt, true);
-        return objectMapper.convertValue(json, FinalAnalysis.class);
+                """.formatted(
+                objectMapper.valueToTree(account),
+                question,
+                riskScore,
+                objectMapper.valueToTree(evidence)
+        );
+        LlmCallResult result = callChat(prompt, true);
+        return new AnalysisOutcome(
+                objectMapper.convertValue(result.json(), FinalAnalysis.class),
+                result.usage()
+        );
     }
 
-    private JsonNode callChat(String prompt, boolean jsonMode) {
+    private LlmCallResult callChat(String prompt, boolean jsonMode) {
         if (properties.agent().llm().baseUrl().isBlank()) {
             throw new IllegalStateException("LLM base URL is empty");
         }
@@ -163,13 +191,18 @@ public class AgentIntelligenceService {
             throw new IllegalStateException("Model did not return content");
         }
         try {
-            return objectMapper.readTree(stripFence(content));
+            TokenUsage usage = new TokenUsage(
+                    response.path("usage").path("prompt_tokens").asLong(0),
+                    response.path("usage").path("completion_tokens").asLong(0),
+                    properties.agent().llm().model()
+            );
+            return new LlmCallResult(objectMapper.readTree(stripFence(content)), usage);
         } catch (Exception ex) {
             throw new IllegalStateException("Model returned invalid JSON", ex);
         }
     }
 
-    private FinalAnalysis deterministicAnalysis(Account account, List<Evidence> evidence) {
+    private FinalAnalysis deterministicAnalysis(Account account, List<Evidence> evidence, double riskScore) {
         List<RiskFactor> factors = evidence.stream()
                 .filter(item -> "risk".equals(item.source()))
                 .flatMap(item -> {
@@ -180,9 +213,18 @@ public class AgentIntelligenceService {
                     return java.util.stream.Stream.empty();
                 })
                 .toList();
-        String diagnosisCode = diagnose(evidence);
+        String diagnosisCode = riskScore < properties.risk().candidateThreshold()
+                ? "HEALTHY"
+                : diagnose(evidence);
+        String factorCode = switch (diagnosisCode) {
+            case "ADOPTION_GAP" -> "adoption";
+            case "SUPPORT_BLOCKED" -> "support";
+            case "BILLING_BLOCKED" -> "billing";
+            case "SPONSOR_DISENGAGED" -> "engagement";
+            default -> "usage";
+        };
         RiskFactor top = factors.stream()
-                .filter(factor -> factor.code().equals(diagnosisCode))
+                .filter(factor -> factor.code().equals(factorCode))
                 .findFirst()
                 .orElseGet(() -> factors.stream()
                         .max((left, right) -> Double.compare(left.contribution(), right.contribution()))
@@ -195,6 +237,10 @@ public class AgentIntelligenceService {
             case "engagement" -> "SALES";
             default -> "CUSTOMER_SUCCESS";
         };
+        if ("HEALTHY".equals(diagnosisCode)) {
+            String summary = account.name() + "当前未达到续费风险阈值，不建议创建处置任务，保持定期回访。";
+            return new FinalAnalysis(summary, "HEALTHY", "未发现需要立即处置的主要风险", null);
+        }
         String title = switch (owner) {
             case "SUPPORT" -> "升级工单并安排技术复盘";
             case "FINANCE" -> "确认付款计划并同步续约风险";
@@ -213,6 +259,7 @@ public class AgentIntelligenceService {
                 account.name(), account.renewalDays(), top.label());
         return new FinalAnalysis(
                 summary,
+                toRootCauseCode(top.code()),
                 rootCause,
                 new ActionDraft(
                         title,
@@ -249,22 +296,35 @@ public class AgentIntelligenceService {
                 overdueDays = (long) number(item.data().get("maxOverdueDays"));
             }
         }
+        if (usageDrop >= 0.30 && adoption <= 0.32) {
+            return "TRUE_CHURN";
+        }
         if (usageDrop >= 0.10 && adoption <= 0.32) {
-            return "adoption";
+            return "ADOPTION_GAP";
         }
         if (openP1 >= 2) {
-            return "support";
+            return "SUPPORT_BLOCKED";
         }
         if (overdueDays >= 30) {
-            return "billing";
+            return "BILLING_BLOCKED";
         }
         if (inactiveAdminDays >= 20 && usageDrop < 0.15) {
-            return "engagement";
+            return "SPONSOR_DISENGAGED";
         }
         if (adoption < 0.5) {
-            return "adoption";
+            return "ADOPTION_GAP";
         }
-        return "usage";
+        return "TRUE_CHURN";
+    }
+
+    private String toRootCauseCode(String factorCode) {
+        return switch (factorCode) {
+            case "adoption" -> "ADOPTION_GAP";
+            case "support" -> "SUPPORT_BLOCKED";
+            case "billing" -> "BILLING_BLOCKED";
+            case "engagement" -> "SPONSOR_DISENGAGED";
+            default -> "TRUE_CHURN";
+        };
     }
 
     private double number(Object value) {
@@ -300,5 +360,8 @@ public class AgentIntelligenceService {
             }
         }
         return trimmed;
+    }
+
+    private record LlmCallResult(JsonNode json, TokenUsage usage) {
     }
 }

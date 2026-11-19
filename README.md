@@ -38,6 +38,8 @@ CREATED -> PLANNING -> EXECUTING_TOOL -> ANALYZING
 - RocketMQ 异步调查队列（可选）
 - Vue 3 + Vite
 - OpenAI-compatible LLM；无模型密钥时使用确定性规划与降级分析
+- OpenTelemetry + Langfuse Cloud 在线追踪
+- 36 条金标准离线评测、可选独立 LLM-as-Judge
 
 ## 快速启动
 
@@ -103,6 +105,70 @@ $env:LLM_MODEL="your-model"
 
 模型只负责选择已注册工具和生成结构化分析。工具白名单、状态机、最大调用次数、审批、幂等和审计全部由 Java 后端执行。
 
+## Agent 评测
+
+评测中心包含 30 个风险正例和 6 个健康负例，直接复用线上 Agent 执行内核，但不会创建待办或修改线上调查。
+
+运行全部确定性评测：
+
+```powershell
+.\mvnw.cmd -Peval test
+```
+
+CI 使用的阻断命令：
+
+```powershell
+.\mvnw.cmd -Peval verify
+```
+
+报告输出到：
+
+```text
+target/evaluation/latest.json
+target/evaluation/latest.md
+```
+
+关键阻断阈值：
+
+| 指标 | 阈值 |
+|---|---:|
+| 完成率 | >= 95% |
+| 根因 Top-1 准确率 | >= 80% |
+| 工具选择准确率 | >= 90% |
+| 证据覆盖率 | >= 90% |
+| 行动策略通过率 | = 100% |
+| 严重安全违规 | = 0 |
+
+独立 Judge 默认关闭，可通过以下环境变量启用：
+
+```powershell
+$env:LLM_JUDGE_MODE="openai"
+$env:LLM_JUDGE_BASE_URL="https://your-provider.example/v1"
+$env:LLM_JUDGE_API_KEY="your-key"
+$env:LLM_JUDGE_MODEL="your-judge-model"
+```
+
+## Langfuse
+
+Java 通过 OpenTelemetry HTTP/Protobuf 发送 Trace，不使用 gRPC。Langfuse 默认关闭，不会影响本地启动或测试。
+
+```powershell
+$env:LANGFUSE_ENABLED="true"
+$env:LANGFUSE_HOST="https://cloud.langfuse.com"
+$env:LANGFUSE_PUBLIC_KEY="pk-lf-..."
+$env:LANGFUSE_SECRET_KEY="sk-lf-..."
+$env:LANGFUSE_PROJECT_ID="your-project-id"
+$env:LANGFUSE_ENVIRONMENT="development"
+```
+
+OTLP Endpoint：
+
+```text
+https://cloud.langfuse.com/api/public/otel/v1/traces
+```
+
+每次线上调查会记录 Agent 根 Span、Planner/Analyzer、工具调用、Token、耗时和追溯信息；离线评测会按 Experiment 分组，并通过 Scores API 上传指标。
+
 ## MySQL、Redis 与 RocketMQ
 
 默认使用本地 H2 文件数据库，不需要安装任何基础设施。
@@ -141,6 +207,12 @@ RocketMQ 调查队列：
 | GET | `/api/investigations/{id}/events` | SSE 执行轨迹 |
 | POST | `/api/investigations/{id}/approve-task` | 确认并幂等创建待办 |
 | POST | `/api/tasks/{id}/follow-up` | 立即模拟到期复查 |
+| GET | `/api/evaluations/capabilities` | Judge 与 Langfuse 配置状态 |
+| GET | `/api/evaluations/cases` | 当前金标准用例 |
+| POST | `/api/evaluations/runs` | 创建异步评测运行 |
+| GET | `/api/evaluations/runs/{id}` | 查看评测指标与用例 |
+| GET | `/api/evaluations/latest` | 最近一次评测 |
+| POST | `/api/evaluations/runs/{id}/judge` | 对已有结果运行 Judge |
 | GET | `/actuator/health` | 健康检查 |
 
 ## 测试
@@ -156,6 +228,20 @@ RocketMQ 调查队列：
 - 完整 Agent 工具循环和证据留存
 - 审批幂等建单
 - 到期复查结果
+- 评测根因、工具、证据、行动策略和健康负例
+- OpenTelemetry 父子 Span 与 Langfuse Experiment 属性
+- Langfuse Scores API 请求格式、鉴权和失败降级
+
+## CI
+
+GitHub Actions 工作流位于 `.github/workflows/ci.yml`，在 Pull Request、`main` 推送和版本 Tag 上执行：
+
+- 安装 Java 21 和 Node.js 22
+- 构建 Vue 前端
+- 执行后端测试
+- 执行 `./mvnw -Peval verify`
+- 打包 Spring Boot JAR
+- 上传 JAR、JSON 和 Markdown 评测报告
 
 ## 安全边界
 

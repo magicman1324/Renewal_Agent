@@ -4,23 +4,22 @@ import com.wanghongbo.renewalagent.config.AppProperties;
 import com.wanghongbo.renewalagent.model.Models.Account;
 import com.wanghongbo.renewalagent.model.Models.ActionDraft;
 import com.wanghongbo.renewalagent.model.Models.AgentStep;
-import com.wanghongbo.renewalagent.model.Models.Decision;
+import com.wanghongbo.renewalagent.model.Models.AgentExecutionResult;
+import com.wanghongbo.renewalagent.model.Models.AgentTelemetry;
 import com.wanghongbo.renewalagent.model.Models.Evidence;
-import com.wanghongbo.renewalagent.model.Models.FinalAnalysis;
 import com.wanghongbo.renewalagent.model.Models.InternalTask;
 import com.wanghongbo.renewalagent.model.Models.Investigation;
 import com.wanghongbo.renewalagent.model.Models.InvestigationStatus;
 import com.wanghongbo.renewalagent.model.Models.InvestigationView;
 import com.wanghongbo.renewalagent.model.Models.StepStatus;
 import com.wanghongbo.renewalagent.model.Models.TaskStatus;
-import com.wanghongbo.renewalagent.model.Models.ToolDefinition;
-import com.wanghongbo.renewalagent.model.Models.ToolResult;
 import com.wanghongbo.renewalagent.persistence.DatabaseService;
+import com.wanghongbo.renewalagent.observability.LangfuseScoreClient;
+import com.wanghongbo.renewalagent.observability.AgentTracingService;
 import com.wanghongbo.renewalagent.service.queue.InvestigationQueue;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -38,24 +37,27 @@ public class AgentRuntimeService {
 
     private final DatabaseService database;
     private final AppProperties properties;
-    private final ToolService tools;
-    private final AgentIntelligenceService intelligence;
+    private final AgentExecutionEngine executionEngine;
     private final InvestigationQueue investigationQueue;
+    private final LangfuseScoreClient scoreClient;
+    private final AgentTracingService tracing;
     private final Clock clock;
 
     public AgentRuntimeService(
             DatabaseService database,
             AppProperties properties,
-            ToolService tools,
-            AgentIntelligenceService intelligence,
+            AgentExecutionEngine executionEngine,
             InvestigationQueue investigationQueue,
+            LangfuseScoreClient scoreClient,
+            AgentTracingService tracing,
             Clock clock
     ) {
         this.database = database;
         this.properties = properties;
-        this.tools = tools;
-        this.intelligence = intelligence;
+        this.executionEngine = executionEngine;
         this.investigationQueue = investigationQueue;
+        this.scoreClient = scoreClient;
+        this.tracing = tracing;
         this.clock = clock;
     }
 
@@ -103,7 +105,19 @@ public class AgentRuntimeService {
                 database.findSteps(id),
                 database.findEvidence(id),
                 task.orElse(null),
-                task.map(value -> database.findFollowUps(value.id())).orElse(List.of())
+                task.map(value -> database.findFollowUps(value.id())).orElse(List.of()),
+                database.findTelemetry(id)
+                        .map(telemetry -> new AgentTelemetry(
+                                telemetry.traceId(),
+                                telemetry.rootObservationId(),
+                                telemetry.toolCalls(),
+                                telemetry.inputTokens(),
+                                telemetry.outputTokens(),
+                                telemetry.durationMs(),
+                                telemetry.langfuseStatus(),
+                                scoreClientUrl(telemetry.traceId())
+                        ))
+                        .orElse(null)
         ));
     }
 
@@ -121,78 +135,28 @@ public class AgentRuntimeService {
             return;
         }
         Account account = database.findAccount(investigation.accountId()).orElseThrow();
-        try {
-            update(investigation, InvestigationStatus.PLANNING, null, null, null);
-            addStep(investigation, "PLAN", "开始规划调查", "加载只读工具与当前客户上下文", StepStatus.SUCCEEDED, 0);
-
-            Set<String> calledTools = new HashSet<>();
-            List<ToolDefinition> definitions = tools.definitions();
-            int maxCalls = Math.min(properties.agent().maxToolCalls(), definitions.size());
-            for (int i = 0; i < maxCalls; i++) {
-                List<Evidence> evidence = database.findEvidence(investigationId);
-                Decision decision = intelligence.nextDecision(
-                        account, investigation.question(), definitions, evidence, calledTools);
-                if (!"CALL_TOOL".equalsIgnoreCase(decision.action()) || decision.tool() == null) {
-                    break;
-                }
-                if (!definitions.stream().anyMatch(tool -> tool.name().equals(decision.tool()))) {
-                    addStep(investigation, "POLICY", "工具调用被拒绝",
-                            "未注册工具：" + decision.tool(), StepStatus.FAILED, 0);
-                    break;
-                }
-                if (!calledTools.add(decision.tool())) {
-                    addStep(investigation, "POLICY", "跳过重复工具",
-                            decision.tool(), StepStatus.SKIPPED, 0);
-                    break;
-                }
-
-                update(investigation, InvestigationStatus.EXECUTING_TOOL, null, null, null);
-                long started = System.nanoTime();
-                ToolResult result = tools.execute(decision.tool(), account,
-                        decision.arguments() == null ? Map.of() : decision.arguments());
-                long durationMs = (System.nanoTime() - started) / 1_000_000;
-                String source = sourceFor(decision.tool());
-                String label = result.summary();
-                database.addEvidence(new Evidence(
-                        "EVD-" + UUID.randomUUID(),
-                        investigationId,
-                        source,
-                        label,
-                        result.summary(),
-                        result.data(),
-                        Instant.now(clock)
-                ));
-                addStep(
-                        investigation,
-                        "TOOL",
-                        decision.tool(),
-                        decision.reason() + " | " + result.summary(),
-                        result.success() ? StepStatus.SUCCEEDED : StepStatus.FAILED,
-                        durationMs
-                );
-            }
-
-            update(investigation, InvestigationStatus.ANALYZING, null, null, null);
-            List<Evidence> evidence = database.findEvidence(investigationId);
-            FinalAnalysis analysis = intelligence.analyze(account, investigation.question(), evidence);
-            validateAnalysis(analysis);
-            update(investigation, InvestigationStatus.WAITING_APPROVAL, analysis.summary(),
-                    analysis.rootCause(), analysis.action());
-            addStep(investigation, "ANALYZE", "生成行动草案",
-                    analysis.rootCause(), StepStatus.SUCCEEDED, 0);
-        } catch (Exception ex) {
-            log.error("Investigation {} failed", investigationId, ex);
-            database.updateInvestigation(
-                    investigationId,
-                    InvestigationStatus.FAILED,
-                    investigation.riskScore(),
-                    investigation.summary(),
-                    investigation.rootCause(),
-                    investigation.action(),
-                    safeMessage(ex)
-            );
-            addStep(investigation, "ERROR", "调查失败", safeMessage(ex), StepStatus.FAILED, 0);
+        AgentExecutionResult result = executionEngine.execute(
+                account,
+                investigationId,
+                investigation.question(),
+                investigation.riskScore() == null ? 0 : investigation.riskScore(),
+                null,
+                new PersistingObserver(investigation)
+        );
+        database.updateInvestigation(
+                investigationId,
+                result.status(),
+                investigation.riskScore(),
+                result.summary(),
+                result.rootCause(),
+                result.action(),
+                result.error()
+        );
+        database.saveTelemetry(investigationId, result.telemetry());
+        if (result.status() == InvestigationStatus.FAILED) {
+            addStep(investigation, "ERROR", "调查失败", result.error(), StepStatus.FAILED, 0);
         }
+        publishOnlineScores(result);
     }
 
     @Transactional
@@ -237,17 +201,6 @@ public class AgentRuntimeService {
         return saved;
     }
 
-    private void update(
-            Investigation investigation,
-            InvestigationStatus status,
-            String summary,
-            String rootCause,
-            ActionDraft action
-    ) {
-        database.updateInvestigation(
-                investigation.id(), status, investigation.riskScore(), summary, rootCause, action, null);
-    }
-
     private void addStep(
             Investigation investigation,
             String type,
@@ -269,33 +222,61 @@ public class AgentRuntimeService {
         ));
     }
 
-    private String sourceFor(String tool) {
-        return switch (tool) {
-            case "getAccountProfile" -> "crm";
-            case "getUsageTrend" -> "product";
-            case "getSupportTickets" -> "support";
-            case "getBillingStatus" -> "billing";
-            case "searchRenewalPlaybook" -> "knowledge";
-            case "calculateRiskFactors" -> "risk";
-            default -> "tool";
-        };
+    private void publishOnlineScores(AgentExecutionResult result) {
+        if (result.telemetry() == null || result.telemetry().traceId() == null) {
+            return;
+        }
+        Map<String, Double> scores = new java.util.LinkedHashMap<>();
+        scores.put("agent.completed", result.status() == InvestigationStatus.FAILED ? 0.0 : 1.0);
+        scores.put("agent.evidence_count", Math.min(1.0, result.evidence().size() / 6.0));
+        scores.put("agent.action_policy", result.status() == InvestigationStatus.FAILED ? 0.0 : 1.0);
+        scores.put("agent.tool_calls", (double) result.calledTools().size());
+        scoreClient.publish(
+                result.telemetry().traceId(),
+                result.telemetry().rootObservationId(),
+                scores,
+                "Online renewal-agent execution metrics"
+        );
     }
 
-    private void validateAnalysis(FinalAnalysis analysis) {
-        if (analysis == null || analysis.summary() == null || analysis.action() == null) {
-            throw new IllegalStateException("Analysis is incomplete");
-        }
-        ActionDraft action = analysis.action();
-        if (action.title() == null || action.ownerRole() == null || action.steps().isEmpty()) {
-            throw new IllegalStateException("Action draft is incomplete");
-        }
-        if (!Set.of("CUSTOMER_SUCCESS", "SUPPORT", "FINANCE", "SALES").contains(action.ownerRole())) {
-            throw new IllegalStateException("Unsupported owner role: " + action.ownerRole());
-        }
+    private String scoreClientUrl(String traceId) {
+        return tracing.traceUrl(traceId);
     }
 
-    private String safeMessage(Exception ex) {
-        String message = ex.getMessage();
-        return message == null || message.isBlank() ? ex.getClass().getSimpleName() : message;
+    private final class PersistingObserver implements AgentExecutionObserver {
+        private final Investigation investigation;
+
+        private PersistingObserver(Investigation investigation) {
+            this.investigation = investigation;
+        }
+
+        @Override
+        public void onStatus(InvestigationStatus status) {
+            database.updateInvestigation(
+                    investigation.id(),
+                    status,
+                    investigation.riskScore(),
+                    null,
+                    null,
+                    null,
+                    null
+            );
+        }
+
+        @Override
+        public void onStep(
+                String type,
+                String title,
+                String detail,
+                StepStatus status,
+                long durationMs
+        ) {
+            addStep(investigation, type, title, detail, status, durationMs);
+        }
+
+        @Override
+        public void onEvidence(Evidence evidence) {
+            database.addEvidence(evidence);
+        }
     }
 }

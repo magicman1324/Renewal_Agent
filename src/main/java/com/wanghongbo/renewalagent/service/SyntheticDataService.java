@@ -101,7 +101,7 @@ public class SyntheticDataService {
                     case SUPPORT_BLOCKED -> 0.80 - progress * 0.22;
                     case BILLING_BLOCKED -> 0.80 + noise(0.02);
                     case SPONSOR_DISENGAGED -> 0.73 - progress * 0.05;
-                    case TRUE_CHURN -> 0.78 - progress * 0.44;
+                    case TRUE_CHURN -> 0.95 - progress * 0.76;
                 };
                 double adoption = switch (archetype) {
                     case HEALTHY -> 0.74 + noise(0.035);
@@ -109,7 +109,7 @@ public class SyntheticDataService {
                     case SUPPORT_BLOCKED -> 0.68 - progress * 0.22;
                     case BILLING_BLOCKED -> 0.69 + noise(0.025);
                     case SPONSOR_DISENGAGED -> 0.60 - progress * 0.07;
-                    case TRUE_CHURN -> 0.61 - progress * 0.38;
+                    case TRUE_CHURN -> 0.75 - progress * 0.62;
                 };
                 int activeUsers = Math.max(3, (int) Math.round(licensedSeats * baseUtilization));
                 long events = Math.max(20, (long) (activeUsers * (16 + random.nextDouble() * 12)));

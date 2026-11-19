@@ -13,7 +13,7 @@
 
     <groupId>com.wanghongbo</groupId>
     <artifactId>renewal-agent</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
     <name>renewal-agent</name>
     <description>SaaS customer renewal risk investigation agent</description>
 

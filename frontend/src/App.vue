@@ -9,9 +9,25 @@ const question = ref("为什么该客户存在续费风险，应采取什么行�
 const busy = ref(false);
 const message = ref("");
 const stream = ref(null);
+const viewMode = ref("agent");
+const evalCapabilities = ref({
+  judgeConfigured: false,
+  langfuseEnabled: false,
+  langfuseHost: "",
+  langfuseProjectId: ""
+});
+const evaluation = ref(null);
+const previousEvaluation = ref(null);
+const evaluationHistory = ref([]);
+const evaluationBusy = ref(false);
+const evaluationMessage = ref("");
+let evaluationTimer = null;
 
 const selectedCandidate = computed(() =>
   candidates.value.find((item) => item.accountId === selectedAccountId.value)
+);
+const failedEvaluationItems = computed(() =>
+  (evaluation.value?.items || []).filter((item) => !item.passed)
 );
 
 async function request(path, options = {}) {
@@ -78,12 +94,14 @@ function openStream(id) {
   stream.value = source;
   source.addEventListener("update", (event) => {
     selected.value = JSON.parse(event.data);
-    if (["WAITING_APPROVAL", "COMPLETED", "FAILED"].includes(selected.value.investigation.status)) {
+    if (["WAITING_APPROVAL", "COMPLETED", "COMPLETED_NO_ACTION", "FAILED"].includes(selected.value.investigation.status)) {
       busy.value = false;
       message.value =
         selected.value.investigation.status === "FAILED"
           ? `调查失败：${selected.value.investigation.error}`
-          : "调查完成，等待确认行动草案。";
+          : selected.value.investigation.status === "COMPLETED_NO_ACTION"
+            ? "未达到风险门槛，本次无需创建处置任务。"
+            : "调查完成，等待确认行动草案。";
     }
   });
   source.onerror = () => {
@@ -132,6 +150,101 @@ async function followUp() {
   }
 }
 
+async function loadEvaluations() {
+  evaluationHistory.value = await request("/api/evaluations/runs?limit=10");
+  evalCapabilities.value = await request("/api/evaluations/capabilities");
+  try {
+    const latest = await request("/api/evaluations/latest");
+    applyEvaluation(latest);
+  } catch {
+    evaluation.value = null;
+  }
+}
+
+async function applyEvaluation(run) {
+  evaluation.value = run;
+  previousEvaluation.value = null;
+  if (run.run.previousRunId) {
+    try {
+      previousEvaluation.value = await request(`/api/evaluations/runs/${run.run.previousRunId}`);
+    } catch {
+      previousEvaluation.value = null;
+    }
+  }
+  if (!["PENDING", "RUNNING"].includes(run.run.status)) {
+    evaluationBusy.value = false;
+    if (evaluationTimer) {
+      clearInterval(evaluationTimer);
+      evaluationTimer = null;
+    }
+  }
+}
+
+async function runEvaluation(withJudge = false) {
+  evaluationBusy.value = true;
+  evaluationMessage.value = withJudge
+    ? "正在运行 36 条金标准并调用独立 Judge…"
+    : "正在运行 36 条确定性金标准评测…";
+  try {
+    const run = await request("/api/evaluations/runs", {
+      method: "POST",
+      body: JSON.stringify({ judge: withJudge, publishToLangfuse: true })
+    });
+    await applyEvaluation(run);
+    if (evaluationTimer) clearInterval(evaluationTimer);
+    evaluationTimer = window.setInterval(async () => {
+      try {
+        const current = await request(`/api/evaluations/runs/${run.run.id}`);
+        await applyEvaluation(current);
+        if (["COMPLETED", "FAILED"].includes(current.run.status)) {
+          evaluationMessage.value = current.run.summary?.passed
+            ? "评测通过，所有阻断阈值均满足。"
+            : "评测未通过，请查看失败用例。";
+          evaluationHistory.value = await request("/api/evaluations/runs?limit=10");
+        }
+      } catch (error) {
+        evaluationMessage.value = error.message;
+        evaluationBusy.value = false;
+      }
+    }, 1000);
+  } catch (error) {
+    evaluationMessage.value = error.message;
+    evaluationBusy.value = false;
+  }
+}
+
+async function judgeEvaluation() {
+  if (!evaluation.value) return;
+  evaluationBusy.value = true;
+  evaluationMessage.value = "正在使用独立 Judge 评审已有评测结果…";
+  try {
+    evaluation.value = await request(
+      `/api/evaluations/runs/${evaluation.value.run.id}/judge`,
+      { method: "POST" }
+    );
+    evaluationMessage.value = "Judge 评审完成。";
+  } catch (error) {
+    evaluationMessage.value = error.message;
+  } finally {
+    evaluationBusy.value = false;
+  }
+}
+
+function metricDelta(key) {
+  if (!previousEvaluation.value?.run?.summary || !evaluation.value?.run?.summary) return "";
+  const current = evaluation.value.run.summary[key] || 0;
+  const previous = previousEvaluation.value.run.summary[key] || 0;
+  const delta = current - previous;
+  if (Math.abs(delta) < 0.0001) return "与上次持平";
+  return `${delta > 0 ? "+" : ""}${(delta * 100).toFixed(1)}%`;
+}
+
+function langfuseTraceUrl(traceId) {
+  const caps = evalCapabilities.value;
+  if (!caps.langfuseEnabled || !caps.langfuseProjectId || !traceId) return null;
+  return `${caps.langfuseHost.replace(/\/+$/, "")}/project/${caps.langfuseProjectId}/traces/${traceId}`;
+}
+
 function pick(accountId) {
   selectedAccountId.value = accountId;
 }
@@ -148,6 +261,7 @@ function statusLabel(status) {
     ANALYZING: "分析中",
     WAITING_APPROVAL: "待确认",
     COMPLETED: "已完成",
+    COMPLETED_NO_ACTION: "无需行动",
     FAILED: "失败",
     OPEN: "待处理",
     WAITING_FOLLOW_UP: "待复查",
@@ -162,14 +276,22 @@ function formatTime(value) {
   return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "-";
 }
 
+function percent(value) {
+  return value == null ? "-" : `${(value * 100).toFixed(1)}%`;
+}
+
 onMounted(async () => {
   await refreshAll();
+  await loadEvaluations();
   if (!candidates.value.length) {
     await scan();
   }
 });
 
-onBeforeUnmount(closeStream);
+onBeforeUnmount(() => {
+  closeStream();
+  if (evaluationTimer) clearInterval(evaluationTimer);
+});
 </script>
 
 <template>
@@ -182,12 +304,22 @@ onBeforeUnmount(closeStream);
           从风险发现到证据分析、审批建单与效果复查。RAG 只提供经营手册，Agent 负责真正执行调查任务。
         </p>
       </div>
-      <button class="primary" :disabled="busy" @click="scan">
-        {{ busy ? "处理中…" : "重新扫描风险" }}
-      </button>
+      <div class="hero-actions">
+        <nav class="view-tabs">
+          <button :class="{ active: viewMode === 'agent' }" @click="viewMode = 'agent'">
+            经营调查
+          </button>
+          <button :class="{ active: viewMode === 'evaluation' }" @click="viewMode = 'evaluation'">
+            评测中心
+          </button>
+        </nav>
+        <button v-if="viewMode === 'agent'" class="primary" :disabled="busy" @click="scan">
+          {{ busy ? "处理中…" : "重新扫描风险" }}
+        </button>
+      </div>
     </header>
 
-    <section class="metrics">
+    <section v-show="viewMode === 'agent'" class="metrics">
       <article>
         <span>客户总数</span>
         <strong>{{ overview.accountCount }}</strong>
@@ -210,9 +342,9 @@ onBeforeUnmount(closeStream);
       </article>
     </section>
 
-    <p v-if="message" class="notice">{{ message }}</p>
+    <p v-if="message && viewMode === 'agent'" class="notice">{{ message }}</p>
 
-    <main class="workspace">
+    <main v-show="viewMode === 'agent'" class="workspace">
       <section class="panel risk-panel">
         <div class="panel-title">
           <div>
@@ -326,6 +458,20 @@ onBeforeUnmount(closeStream);
               <p>{{ selected.investigation.summary }}</p>
             </div>
 
+            <div v-if="selected.telemetry" class="telemetry-strip">
+              <span>Trace {{ selected.telemetry.traceId || "未启用" }}</span>
+              <span>{{ selected.telemetry.toolCalls }} 次工具调用</span>
+              <span>{{ selected.telemetry.inputTokens + selected.telemetry.outputTokens }} Tokens</span>
+              <a
+                v-if="selected.telemetry.langfuseUrl"
+                :href="selected.telemetry.langfuseUrl"
+                target="_blank"
+                rel="noreferrer"
+              >
+                在 Langfuse 查看
+              </a>
+            </div>
+
             <div class="evidence-grid">
               <article v-for="item in selected.evidence" :key="item.id" class="evidence">
                 <span>{{ item.source }}</span>
@@ -377,6 +523,178 @@ onBeforeUnmount(closeStream);
             </div>
           </template>
         </template>
+      </section>
+    </main>
+
+    <main v-if="viewMode === 'evaluation'" class="evaluation-page">
+      <section class="evaluation-hero">
+        <div>
+          <p class="eyebrow">EVALUATION / LANGFUSE CLOUD</p>
+          <h2>Agent 质量评测中心</h2>
+          <p>
+            36 条固定金标准，覆盖 30 个续费风险正例和 6 个健康客户负例。确定性指标阻断回归，独立 Judge 负责质量评审。
+          </p>
+          <div class="capability-row">
+            <span :class="{ online: evalCapabilities.langfuseEnabled }">
+              Langfuse {{ evalCapabilities.langfuseEnabled ? "已配置" : "未配置" }}
+            </span>
+            <span :class="{ online: evalCapabilities.judgeConfigured }">
+              Judge {{ evalCapabilities.judgeConfigured ? "已配置" : "未配置" }}
+            </span>
+          </div>
+        </div>
+        <div class="evaluation-actions">
+          <button class="primary" :disabled="evaluationBusy" @click="runEvaluation(false)">
+            {{ evaluationBusy ? "评测运行中…" : "运行确定性评测" }}
+          </button>
+          <button
+            class="secondary"
+            :disabled="evaluationBusy || !evalCapabilities.judgeConfigured"
+            @click="runEvaluation(true)"
+          >
+            运行并启用 Judge
+          </button>
+        </div>
+      </section>
+
+      <p v-if="evaluationMessage" class="notice">{{ evaluationMessage }}</p>
+
+      <template v-if="evaluation">
+        <section class="metrics evaluation-metrics">
+          <article :class="{ danger: evaluation.run.summary && !evaluation.run.summary.passed }">
+            <span>总体结果</span>
+            <strong>{{ evaluation.run.summary?.passed ? "PASS" : "FAIL" }}</strong>
+            <small>{{ evaluation.run.datasetVersion }} · {{ evaluation.run.mode }}</small>
+          </article>
+          <article>
+            <span>完成率</span>
+            <strong>{{ percent(evaluation.run.summary?.completionRate) }}</strong>
+            <small>{{ metricDelta("completionRate") }}</small>
+          </article>
+          <article>
+            <span>根因 Top-1</span>
+            <strong>{{ percent(evaluation.run.summary?.rootCauseAccuracy) }}</strong>
+            <small>{{ metricDelta("rootCauseAccuracy") }}</small>
+          </article>
+          <article>
+            <span>证据覆盖</span>
+            <strong>{{ percent(evaluation.run.summary?.evidenceCoverage) }}</strong>
+            <small>{{ metricDelta("evidenceCoverage") }}</small>
+          </article>
+          <article>
+            <span>行动策略</span>
+            <strong>{{ percent(evaluation.run.summary?.actionPolicyPassRate) }}</strong>
+            <small>{{ metricDelta("actionPolicyPassRate") }}</small>
+          </article>
+          <article class="danger">
+            <span>严重违规</span>
+            <strong>{{ evaluation.run.summary?.criticalViolations ?? "-" }}</strong>
+            <small>阈值必须为 0</small>
+          </article>
+        </section>
+
+        <section class="evaluation-layout">
+          <div class="panel evaluation-cases">
+            <div class="panel-title">
+              <div>
+                <p class="eyebrow">GOLDEN SET RESULTS</p>
+                <h2>用例结果</h2>
+              </div>
+              <span class="count">
+                {{ failedEvaluationItems.length }} 个失败 / {{ evaluation.items.length }} 个用例
+              </span>
+            </div>
+            <div class="table-wrap evaluation-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Case</th>
+                    <th>根因</th>
+                    <th>负责人</th>
+                    <th>证据</th>
+                    <th>Trace</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="item in evaluation.items"
+                    :key="item.id"
+                    :class="{ failed: !item.passed }"
+                  >
+                    <td>
+                      <strong>{{ item.caseId }}</strong>
+                      <small>{{ item.accountId }}</small>
+                    </td>
+                    <td>
+                      <span :class="['match', item.expectedRootCause === item.actualRootCause ? 'ok' : 'bad']">
+                        {{ item.actualRootCause || item.error }}
+                      </span>
+                      <small>期望 {{ item.expectedRootCause }}</small>
+                    </td>
+                    <td>{{ item.actualOwnerRole }}<small>期望 {{ item.expectedOwnerRole }}</small></td>
+                    <td>{{ percent(item.scores.evidenceCoverage) }}<small>{{ item.durationMs }} ms</small></td>
+                    <td>
+                      <a
+                        v-if="langfuseTraceUrl(item.traceId)"
+                        class="trace-link"
+                        :href="langfuseTraceUrl(item.traceId)"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Langfuse
+                      </a>
+                      <small v-else>{{ item.traceId || "disabled" }}</small>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <aside class="panel evaluation-side">
+            <div class="panel-title">
+              <div>
+                <p class="eyebrow">RUN CONTROL</p>
+                <h2>本次运行</h2>
+              </div>
+            </div>
+            <dl class="run-detail">
+              <div><dt>Run</dt><dd>{{ evaluation.run.id }}</dd></div>
+              <div><dt>状态</dt><dd>{{ evaluation.run.status }}</dd></div>
+              <div><dt>Judge</dt><dd>{{ evaluation.run.judgeStatus }}</dd></div>
+              <div><dt>平均耗时</dt><dd>{{ Math.round(evaluation.run.summary?.averageDurationMs || 0) }} ms</dd></div>
+              <div><dt>P95</dt><dd>{{ Math.round(evaluation.run.summary?.p95DurationMs || 0) }} ms</dd></div>
+              <div><dt>Tokens</dt><dd>{{ evaluation.run.summary?.totalInputTokens + evaluation.run.summary?.totalOutputTokens }}</dd></div>
+              <div v-if="evaluation.run.summary?.averageJudgeScore">
+                <dt>Judge</dt><dd>{{ percent(evaluation.run.summary.averageJudgeScore) }}</dd>
+              </div>
+            </dl>
+            <button
+              class="secondary"
+              :disabled="evaluationBusy || !evalCapabilities.judgeConfigured || evaluation.run.status !== 'COMPLETED'"
+              @click="judgeEvaluation"
+            >
+              对本次结果运行 Judge
+            </button>
+            <div class="history">
+              <h3>运行历史</h3>
+              <button
+                v-for="run in evaluationHistory"
+                :key="run.id"
+                class="history-row"
+                @click="request(`/api/evaluations/runs/${run.id}`).then(applyEvaluation)"
+              >
+                <span>{{ formatTime(run.startedAt) }}</span>
+                <strong>{{ run.passed ? "PASS" : run.status }}</strong>
+              </button>
+            </div>
+          </aside>
+        </section>
+      </template>
+      <section v-else class="panel empty-evaluation">
+        <p class="eyebrow">NO EVALUATION YET</p>
+        <h2>先运行一次金标准评测</h2>
+        <p>评测不会创建待办，也不会修改线上调查。</p>
       </section>
     </main>
   </div>
