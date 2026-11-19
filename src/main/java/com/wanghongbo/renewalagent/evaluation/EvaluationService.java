@@ -18,10 +18,12 @@ import com.wanghongbo.renewalagent.model.Models.InvestigationStatus;
 import com.wanghongbo.renewalagent.model.Models.JudgeScores;
 import com.wanghongbo.renewalagent.model.Models.JudgeStatus;
 import com.wanghongbo.renewalagent.observability.LangfuseScoreClient;
-import com.wanghongbo.renewalagent.persistence.DatabaseService;
+import com.wanghongbo.renewalagent.observability.LangfuseDatasetClient;
 import com.wanghongbo.renewalagent.service.AgentExecutionEngine;
 import com.wanghongbo.renewalagent.service.AgentExecutionObserver;
+import com.wanghongbo.renewalagent.service.KnowledgeService;
 import com.wanghongbo.renewalagent.service.RiskScoringService;
+import com.wanghongbo.renewalagent.service.ToolService;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -49,13 +51,15 @@ public class EvaluationService {
 
     private final EvaluationProperties properties;
     private final AppProperties appProperties;
-    private final DatabaseService database;
     private final RiskScoringService riskScoring;
     private final AgentExecutionEngine executionEngine;
     private final EvaluationScoreCalculator scoreCalculator;
     private final EvaluationRepository repository;
     private final JudgeService judgeService;
     private final LangfuseScoreClient scoreClient;
+    private final LangfuseDatasetClient datasetClient;
+    private final EvaluationFixtureFactory fixtureFactory;
+    private final KnowledgeService knowledgeService;
     private final ObjectMapper objectMapper;
     private final Executor executor;
     private final Clock clock;
@@ -63,26 +67,30 @@ public class EvaluationService {
     public EvaluationService(
             EvaluationProperties properties,
             AppProperties appProperties,
-            DatabaseService database,
             RiskScoringService riskScoring,
             AgentExecutionEngine executionEngine,
             EvaluationScoreCalculator scoreCalculator,
             EvaluationRepository repository,
             JudgeService judgeService,
             LangfuseScoreClient scoreClient,
+            LangfuseDatasetClient datasetClient,
+            EvaluationFixtureFactory fixtureFactory,
+            KnowledgeService knowledgeService,
             ObjectMapper objectMapper,
             @Qualifier("agentExecutor") Executor executor,
             Clock clock
     ) {
         this.properties = properties;
         this.appProperties = appProperties;
-        this.database = database;
         this.riskScoring = riskScoring;
         this.executionEngine = executionEngine;
         this.scoreCalculator = scoreCalculator;
         this.repository = repository;
         this.judgeService = judgeService;
         this.scoreClient = scoreClient;
+        this.datasetClient = datasetClient;
+        this.fixtureFactory = fixtureFactory;
+        this.knowledgeService = knowledgeService;
         this.objectMapper = objectMapper;
         this.executor = executor;
         this.clock = clock;
@@ -171,7 +179,8 @@ public class EvaluationService {
             }
             judgedItems.add(withJudge(item, scores));
         }
-        EvaluationSummary summary = summarize(judgedItems);
+        EvaluationFixture fixture = fixtureFactory.create();
+        EvaluationSummary summary = summarize(judgedItems, fixture);
         JudgeStatus judgeStatus = judgedItems.stream().allMatch(item -> item.judgeScores() != null)
                 ? JudgeStatus.COMPLETED
                 : JudgeStatus.FAILED;
@@ -205,11 +214,23 @@ public class EvaluationService {
         EvaluationRun run = repository.findRun(runId).orElseThrow();
         repository.updateJudgeStatus(runId, judgeRequested ? JudgeStatus.PENDING : JudgeStatus.NOT_REQUESTED);
         List<EvaluationItemResult> items = new ArrayList<>();
+        EvaluationFixture fixture = fixtureFactory.create();
+        ToolService fixtureTools = new ToolService(
+                fixture.gateway(),
+                knowledgeService,
+                riskScoring,
+                clock
+        );
+        String experimentDatasetId = publishToLangfuse
+                ? datasetClient.sync(loadCases(), fixture)
+                : fixture.version();
         try {
             for (EvaluationCase testCase : loadCases()) {
-                items.add(executeCase(run, testCase, judgeRequested, publishToLangfuse));
+                items.add(executeCase(
+                        run, testCase, fixture, fixtureTools, judgeRequested,
+                        publishToLangfuse, experimentDatasetId));
             }
-            EvaluationSummary summary = summarize(items);
+            EvaluationSummary summary = summarize(items, fixture);
             JudgeStatus judgeStatus = judgeRequested
                     ? (items.stream().allMatch(item -> item.judgeScores() != null)
                     ? JudgeStatus.COMPLETED
@@ -218,7 +239,7 @@ public class EvaluationService {
             repository.finishRun(runId, EvaluationRunStatus.COMPLETED, judgeStatus, summary, summary.passed());
             writeReports(runId);
         } catch (RuntimeException ex) {
-            EvaluationSummary summary = summarize(items);
+            EvaluationSummary summary = summarize(items, fixture);
             repository.finishRun(runId, EvaluationRunStatus.FAILED, JudgeStatus.FAILED, summary, false);
         }
     }
@@ -226,15 +247,20 @@ public class EvaluationService {
     private EvaluationItemResult executeCase(
             EvaluationRun run,
             EvaluationCase testCase,
+            EvaluationFixture fixture,
+            ToolService fixtureTools,
             boolean judgeRequested,
-            boolean publishToLangfuse
+            boolean publishToLangfuse,
+            String experimentDatasetId
     ) {
-        Account account = database.findAccount(testCase.accountId()).orElseThrow();
+        Account account = Optional.ofNullable(fixture.accounts().get(testCase.accountId()))
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Case " + testCase.caseId() + " references missing fixture account"));
         double riskScore = riskScoring.score(
                 account,
-                database.findUsage(account.id(), LocalDate.now(clock).minusDays(60)),
-                database.findOpenTickets(account.id()),
-                database.findInvoices(account.id())
+                fixture.gateway().findUsage(account.id(), fixture.referenceDate().minusDays(60)),
+                fixture.gateway().findOpenTickets(account.id()),
+                fixture.gateway().findInvoices(account.id())
         ).score();
         AgentExecutionResult result = executionEngine.execute(
                 account,
@@ -244,10 +270,11 @@ public class EvaluationService {
                 new AgentExecutionEngine.ExperimentContext(
                         run.langfuseExperimentId(),
                         "renewal-agent-" + run.datasetVersion(),
-                        run.datasetVersion(),
+                        experimentDatasetId,
                         testCase.caseId(),
                         objectMapper.valueToTree(testCase).toString()
                 ),
+                fixtureTools,
                 AgentExecutionObserver.Noop.INSTANCE
         );
         EvaluationScoreCalculator.ScoreBreakdown breakdown = scoreCalculator.score(
@@ -311,7 +338,7 @@ public class EvaluationService {
         return item;
     }
 
-    private EvaluationSummary summarize(List<EvaluationItemResult> items) {
+    private EvaluationSummary summarize(List<EvaluationItemResult> items, EvaluationFixture fixture) {
         int total = items.size();
         int completed = (int) items.stream()
                 .filter(item -> value(item, "completion") >= 1)
@@ -335,7 +362,13 @@ public class EvaluationService {
                 .mapToDouble(JudgeScores::overall)
                 .average().orElse(0);
         EvaluationThresholds thresholds = thresholds();
-        boolean passed = completionRate >= thresholds.completionRate()
+        List<EvaluationCase> cases = loadCases();
+        boolean dataValid = cases.size() == fixture.accounts().size()
+                && cases.stream().map(EvaluationCase::caseId).distinct().count() == cases.size()
+                && cases.stream().map(EvaluationCase::accountId).distinct().count() == cases.size()
+                && cases.stream().allMatch(testCase -> fixture.accounts().containsKey(testCase.accountId()));
+        boolean passed = dataValid
+                && completionRate >= thresholds.completionRate()
                 && rootCause >= thresholds.rootCauseAccuracy()
                 && toolSelection >= thresholds.toolSelectionAccuracy()
                 && evidence >= thresholds.evidenceCoverage()
@@ -351,6 +384,9 @@ public class EvaluationService {
                 round(actionPolicy),
                 critical,
                 maxToolCalls,
+                fixture.version(),
+                fixture.hash(),
+                dataValid ? "VALID" : "BLOCKED",
                 round(averageDuration),
                 round(p95),
                 inputTokens,

@@ -65,8 +65,11 @@ app:
     environment: ${LANGFUSE_ENVIRONMENT:development}
     release: ${APP_RELEASE:0.2.0}
     flush-timeout-millis: 5000
+    dataset:
+      enabled: ${LANGFUSE_DATASET_SYNC_ENABLED:true}
+      name: renewal-agent-golden-set-v2
   evaluation:
-    dataset-version: golden-set-v1
+    dataset-version: golden-set-v2
     output-dir: target/evaluation
     ci-fail-on-threshold: true
     judge:

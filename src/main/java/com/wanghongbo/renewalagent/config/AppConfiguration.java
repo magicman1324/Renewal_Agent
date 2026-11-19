@@ -13,6 +13,7 @@ import org.springframework.web.client.RestClient;
 @EnableConfigurationProperties({
         AppProperties.class,
         LangfuseProperties.class,
+        LangfuseDatasetProperties.class,
         EvaluationProperties.class
 })
 public class AppConfiguration {

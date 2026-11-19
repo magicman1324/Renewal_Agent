@@ -1,5 +1,7 @@
 # SaaS 客户续费经营 Agent
 
+项目问题调查、根因与处理效果记录见 [面试点.md](面试点.md)。
+
 面向 B2B 订阅制 SaaS 客户成功团队的续费风险调查 Agent。系统每天扫描未来 90 天内到期的客户，通过规则引擎发现风险，再由 Agent 自主调用客户档案、产品使用、客服工单、账务和 RAG 知识工具，形成带证据的根因分析和处置草案。
 
 与普通 RAG 问答的差异：
@@ -85,6 +87,8 @@ npm run build
 
 固定随机种子保证演示结果可复现。演示账户 `ACC-003` 是工单阻塞场景，`ACC-004` 是账务阻塞场景。
 
+Demo 数据通过 `seed_metadata` 管理版本。当前版本为 `demo-v2`，版本变化时会自动重建 `ACC-*` 合成账户及其使用、工单和账单数据。
+
 ## LLM 配置
 
 默认 `deterministic` 模式不调用外部模型，可直接运行和测试：
@@ -107,7 +111,9 @@ $env:LLM_MODEL="your-model"
 
 ## Agent 评测
 
-评测中心包含 30 个风险正例和 6 个健康负例，直接复用线上 Agent 执行内核，但不会创建待办或修改线上调查。
+评测中心包含 30 个风险正例和 6 个健康负例，直接复用 Agent 执行内核，但从版本化内存 fixture 读取数据，不访问线上 H2/MySQL，也不会创建待办或修改线上调查。
+
+每次运行会记录 `fixtureVersion`、SHA-256 `fixtureHash` 和 `dataStatus`。Fixture 校验失败时数据状态为 `BLOCKED`，不能判定为 PASS。
 
 运行全部确定性评测：
 
@@ -159,6 +165,7 @@ $env:LANGFUSE_PUBLIC_KEY="pk-lf-..."
 $env:LANGFUSE_SECRET_KEY="sk-lf-..."
 $env:LANGFUSE_PROJECT_ID="your-project-id"
 $env:LANGFUSE_ENVIRONMENT="development"
+$env:LANGFUSE_DATASET_SYNC_ENABLED="true"
 ```
 
 OTLP Endpoint：
@@ -167,7 +174,7 @@ OTLP Endpoint：
 https://cloud.langfuse.com/api/public/otel/v1/traces
 ```
 
-每次线上调查会记录 Agent 根 Span、Planner/Analyzer、工具调用、Token、耗时和追溯信息；离线评测会按 Experiment 分组，并通过 Scores API 上传指标。
+每次线上调查会记录 Agent 根 Span、Planner/Analyzer、工具调用、Token、耗时和追溯信息；离线评测会按 Experiment 分组，并通过 Scores API 上传指标。启用 Dataset 同步时，Git fixture 会以稳定 Case ID 镜像到 Langfuse，但 Langfuse 不可用不会阻断本地评测。
 
 ## MySQL、Redis 与 RocketMQ
 

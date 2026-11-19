@@ -664,6 +664,15 @@ onBeforeUnmount(() => {
             <dl class="run-detail">
               <div><dt>Run</dt><dd>{{ evaluation.run.id }}</dd></div>
               <div><dt>状态</dt><dd>{{ evaluation.run.status }}</dd></div>
+              <div><dt>数据状态</dt><dd>{{ evaluation.run.summary?.dataStatus || "-" }}</dd></div>
+              <div>
+                <dt>Fixture</dt>
+                <dd>{{ evaluation.run.summary?.fixtureVersion || "-" }}</dd>
+              </div>
+              <div>
+                <dt>Hash</dt>
+                <dd>{{ evaluation.run.summary?.fixtureHash?.slice(0, 12) || "-" }}</dd>
+              </div>
               <div><dt>Judge</dt><dd>{{ evaluation.run.judgeStatus }}</dd></div>
               <div><dt>平均耗时</dt><dd>{{ Math.round(evaluation.run.summary?.averageDurationMs || 0) }} ms</dd></div>
               <div><dt>P95</dt><dd>{{ Math.round(evaluation.run.summary?.p95DurationMs || 0) }} ms</dd></div>

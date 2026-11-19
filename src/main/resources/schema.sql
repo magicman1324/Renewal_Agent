@@ -158,6 +158,12 @@ CREATE TABLE IF NOT EXISTS evaluation_items (
     error TEXT
 );
 
+CREATE TABLE IF NOT EXISTS seed_metadata (
+    seed_key VARCHAR(100) PRIMARY KEY,
+    seed_version VARCHAR(100) NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_usage_account_date ON usage_daily(account_id, usage_date);
 CREATE INDEX IF NOT EXISTS idx_ticket_account ON tickets(account_id);
 CREATE INDEX IF NOT EXISTS idx_invoice_account ON invoices(account_id);

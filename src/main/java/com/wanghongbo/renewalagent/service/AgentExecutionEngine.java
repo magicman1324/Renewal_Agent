@@ -57,6 +57,18 @@ public class AgentExecutionEngine {
             ExperimentContext experiment,
             AgentExecutionObserver observer
     ) {
+        return execute(account, executionId, question, riskScore, experiment, tools, observer);
+    }
+
+    public AgentExecutionResult execute(
+            Account account,
+            String executionId,
+            String question,
+            double riskScore,
+            ExperimentContext experiment,
+            ToolService executionTools,
+            AgentExecutionObserver observer
+    ) {
         long started = System.nanoTime();
         AgentExecutionObserver safeObserver = observer == null ? AgentExecutionObserver.Noop.INSTANCE : observer;
         AgentTracingService.TraceSession trace = experiment == null
@@ -78,7 +90,7 @@ public class AgentExecutionEngine {
                     StepStatus.SUCCEEDED, 0);
 
             Set<String> called = new HashSet<>();
-            List<ToolDefinition> definitions = tools.definitions();
+            List<ToolDefinition> definitions = executionTools.definitions();
             int maxCalls = Math.min(properties.agent().maxToolCalls(), definitions.size());
             for (int i = 0; i < maxCalls; i++) {
                 AgentTracingService.Observation planning = planningObservation(trace, account, question, called);
@@ -115,7 +127,7 @@ public class AgentExecutionEngine {
                 );
                 long toolStarted = System.nanoTime();
                 try {
-                    ToolResult result = tools.execute(
+                    ToolResult result = executionTools.execute(
                             decision.tool(),
                             account,
                             decision.arguments() == null ? Map.of() : decision.arguments()
